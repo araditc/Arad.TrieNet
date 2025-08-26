@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Version>0.1.0</Version>
+    <Authors>Arad ITC</Authors>
+    <Description>Arad.TrieNet: Ultra-fast, thread-safe IP filtering library powered by Trie for high-performance network access control.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/araditc/Arad.TrieNet</RepositoryUrl>
+    <PackageTags>ip-filtering, network-security, trie, performance, csharp</PackageTags>
+    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+    <Title>Arad.TrieNet</Title>
+    <Copyright>@AradITC</Copyright>
+    <PackageProjectUrl>https://github.com/araditc/Arad.TrieNet</PackageProjectUrl>
+  </PropertyGroup>
+
+
+</Project>
