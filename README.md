@@ -1,7 +1,7 @@
 # Arad.TrieNet
 
 ![GitHub License](https://img.shields.io/github/license/araditc/Arad.TrieNet)
-![NuGet Version](https://img.shields.io/nuget/v/Arad.TrieNet)
+![NuGet Version](https://www.nuget.org/packages/Arad.TrieNet)
 
 Arad.TrieNet is an ultra-fast, thread-safe, and scalable IP filtering library designed for high-performance network access control. Powered by a Trie-based data structure, it handles 100,000+ requests per second with minimal latency, making it ideal for fraud prevention and network security in multi-tenant systems.
 
