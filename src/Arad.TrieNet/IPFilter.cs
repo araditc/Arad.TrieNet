@@ -1,59 +1,39 @@
 ﻿using System.Collections.Concurrent;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Text;
-using System.Numerics;
 
 namespace Arad.TrieNet;
 
 /// <summary>
-/// Provides ultra-fast, thread-safe IP filtering using a Trie-based data structure.
+///     Provides ultra-fast, thread-safe IP filtering using a Trie-based data structure.
 /// </summary>
 /// <remarks>
-/// Optimized for high-performance scenarios (100,000+ RPS, 200,000 users) with minimal memory usage (&lt;50MB for 1M CIDRs).
-/// Supports IPv4/IPv6 CIDR-based networks and a bucket-based deny list.
+///     Optimized for high-performance scenarios (100,000+ RPS, 200,000 users) with minimal memory usage (&lt;50MB for 1M
+///     CIDRs).
+///     Supports IPv4/IPv6 CIDR-based networks and a bucket-based deny list.
 /// </remarks>
 public static class IPFilter
 {
+    private const int IPv4Stride = 8;
+    private const int IPv6Stride = 16;
+
     private static readonly Node?[] _roots4 = new Node?[256];
     private static readonly ConcurrentDictionary<int, Node> _roots6 = new();
     private static readonly ConcurrentDictionary<string, (bool IPv4AllAllowed, bool IPv6AllAllowed)> _userAllAllowed = new();
-    private static string? _v4AllOwner;
-    private static string? _v6AllOwner;
     private static readonly ConcurrentDictionary<string, string> _cidrToUser = new();
     private static readonly ConcurrentDictionary<string, ConcurrentHashSet<string>> _userToCidrsIndex = new();
     private static readonly ConcurrentHashSet<DenyEntry> _globalDenyList = new();
     private static readonly ConcurrentDictionary<int, ConcurrentHashSet<DenyEntry>> _denyListIPv4Buckets = new();
     private static readonly ConcurrentDictionary<int, ConcurrentHashSet<DenyEntry>> _denyListIPv6Buckets = new();
     private static readonly ReaderWriterLockSlim _lock = new();
-    private const int IPv4Stride = 8;
-    private const int IPv6Stride = 16;
-
-    /// <summary>
-    /// A thread-safe hash set implementation for storing items.
-    /// </summary>
-    private class ConcurrentHashSet<T> : ConcurrentDictionary<T, byte> where T : notnull
-    {
-        public ConcurrentHashSet() : base() { }
-
-        /// <summary>
-        /// Adds an item to the set.
-        /// </summary>
-        public bool Add(T item) => TryAdd(item, 0);
-
-        /// <summary>
-        /// Removes an item from the set.
-        /// </summary>
-        public bool TryRemove(T item) => TryRemove(item, out _);
-
-        /// <summary>
-        /// Gets whether the set is empty.
-        /// </summary>
-        public new bool IsEmpty => base.IsEmpty;
-    }
+    private static string? _v4AllOwner;
+    private static string? _v6AllOwner;
 
     static IPFilter()
     {
-        (string cidr, string? username, bool isDeny)[] initial = {
+        (string cidr, string? username, bool isDeny)[] initial =
+        [
             ("91.199.9.60", "user1", false),
             ("185.37.54.112/27", "user1", false),
             ("180.31.2.5/29", "user2", false),
@@ -63,7 +43,8 @@ public static class IPFilter
             ("192.168.1.0/24", null, true),
             ("0.0.0.0/0", "admin", false),
             ("192.168.1.1-192.168.1.10", "user1", false)
-        };
+        ];
+
         foreach ((string cidr, string? username, bool isDeny) in initial)
         {
             if (isDeny)
@@ -78,7 +59,7 @@ public static class IPFilter
     }
 
     /// <summary>
-    /// Adds a network or range to a user's allowed list.
+    ///     Adds a network or range to a user's allowed list.
     /// </summary>
     /// <param name="cidrOrRange">The CIDR or IP range (e.g., "192.168.1.0/24" or "192.168.1.1-192.168.1.10"). </param>
     /// <param name="username">The user ID to associate with the network.</param>
@@ -139,6 +120,7 @@ public static class IPFilter
                         ipv4 = true;
                         _v4AllOwner = username;
                     }
+
                     _userAllAllowed[username] = (ipv4, ipv6);
 
                     _cidrToUser[key] = username;
@@ -179,7 +161,7 @@ public static class IPFilter
     }
 
     /// <summary>
-    /// Adds a network or range to the global deny list.
+    ///     Adds a network or range to the global deny list.
     /// </summary>
     /// <param name="cidrOrRange">The CIDR or IP range to deny.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -206,7 +188,7 @@ public static class IPFilter
                 byte[] net = ipBytes.ToArray();
                 DenyEntry entry = new(isIPv6, net, prefix);
                 int stride = isIPv6 ? IPv6Stride : IPv4Stride;
-                int firstBucket = isIPv6 ? ((ipBytes[0] << 8) | ipBytes[1]) : ipBytes[0];
+                int firstBucket = isIPv6 ? (ipBytes[0] << 8) | ipBytes[1] : ipBytes[0];
                 if (prefix < stride)
                 {
                     int span = 1 << (stride - prefix);
@@ -225,6 +207,7 @@ public static class IPFilter
                     ConcurrentHashSet<DenyEntry> set = dict.GetOrAdd(bucket, _ => new());
                     set.Add(entry);
                 }
+
                 _globalDenyList.Add(entry);
             }
         }
@@ -235,7 +218,7 @@ public static class IPFilter
     }
 
     /// <summary>
-    /// Removes a network or range from a user's allowed list.
+    ///     Removes a network or range from a user's allowed list.
     /// </summary>
     /// <param name="cidrOrRange">The CIDR or IP range to remove. </param>
     /// <param name="username">The user ID associated with the network. </param>
@@ -272,6 +255,7 @@ public static class IPFilter
                         ipv4 = false;
                         _v4AllOwner = null;
                     }
+
                     _userAllAllowed[username] = (ipv4, ipv6);
 
                     string key = isIPv6 ? "::/0" : "0.0.0.0/0";
@@ -283,6 +267,7 @@ public static class IPFilter
                             userCidrs.TryRemove(key);
                         }
                     }
+
                     continue;
                 }
 
@@ -321,6 +306,7 @@ public static class IPFilter
                                 bit = current.BitIndex + 1;
                             }
                         }
+
                         if (current?.UserId == username)
                         {
                             current.IsAllowed = false;
@@ -398,7 +384,7 @@ public static class IPFilter
     }
 
     /// <summary>
-    /// Removes a network or range from the global deny list.
+    ///     Removes a network or range from the global deny list.
     /// </summary>
     /// <param name="cidrOrRange">The CIDR or IP range to remove.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -425,7 +411,7 @@ public static class IPFilter
                 byte[] net = ipBytes.ToArray();
                 DenyEntry entry = new(isIPv6, net, prefix);
                 int stride = isIPv6 ? IPv6Stride : IPv4Stride;
-                int firstBucket = isIPv6 ? ((ipBytes[0] << 8) | ipBytes[1]) : ipBytes[0];
+                int firstBucket = isIPv6 ? (ipBytes[0] << 8) | ipBytes[1] : ipBytes[0];
                 if (prefix < stride)
                 {
                     int span = 1 << (stride - prefix);
@@ -447,6 +433,7 @@ public static class IPFilter
                         dict.TryRemove(firstBucket, out _);
                     }
                 }
+
                 _globalDenyList.TryRemove(entry);
             }
         }
@@ -457,7 +444,7 @@ public static class IPFilter
     }
 
     /// <summary>
-    /// Checks if an IP address is allowed for a specific user.
+    ///     Checks if an IP address is allowed for a specific user.
     /// </summary>
     /// <param name="userName">The user ID to check. </param>
     /// <param name="xForwardedFor">The IP address or X-Forwarded-For header. </param>
@@ -559,7 +546,7 @@ public static class IPFilter
     }
 
     /// <summary>
-    /// Finds the owner of an IP address.
+    ///     Finds the owner of an IP address.
     /// </summary>
     /// <param name="xForwardedFor">The IP address or X-Forwarded-For header. </param>
     /// <returns>A tuple containing the owner and the reason.</returns>
@@ -646,8 +633,8 @@ public static class IPFilter
                 return (matchedUserId, "allowed");
             }
 
-            return isIPv6 ? (_v6AllOwner is not null ? (_v6AllOwner, "allowed") : (null, "not found"))
-                       : (_v4AllOwner is not null ? (_v4AllOwner, "allowed") : (null, "not found"));
+            return isIPv6 ? _v6AllOwner is not null ? (_v6AllOwner, "allowed") : (null, "not found")
+                   : _v4AllOwner is not null ? (_v4AllOwner, "allowed") : (null, "not found");
         }
         finally
         {
@@ -656,7 +643,7 @@ public static class IPFilter
     }
 
     /// <summary>
-    /// Finds the owner and CIDR of an IP address.
+    ///     Finds the owner and CIDR of an IP address.
     /// </summary>
     /// <param name="xForwardedFor">The IP address or X-Forwarded-For header. </param>
     /// <returns>A tuple containing the owner, CIDR, and reason.</returns>
@@ -718,6 +705,7 @@ public static class IPFilter
                     matchedUser = current.UserId;
                     matchedCidr = current.Cidr;
                 }
+
                 int byteIndex = bit / 8;
                 int bitIndex = 7 - (bit % 8);
                 int bitValue = (ipBytes[byteIndex] >> bitIndex) & 1;
@@ -744,8 +732,8 @@ public static class IPFilter
                 return (matchedUser, matchedCidr, "allowed");
             }
 
-            return isIPv6 ? (_v6AllOwner is not null ? (_v6AllOwner, "::/0", "allowed") : (null, null, "not found"))
-                       : (_v4AllOwner is not null ? (_v4AllOwner, "0.0.0.0/0", "allowed") : (null, null, "not found"));
+            return isIPv6 ? _v6AllOwner is not null ? (_v6AllOwner, "::/0", "allowed") : (null, null, "not found")
+                   : _v4AllOwner is not null ? (_v4AllOwner, "0.0.0.0/0", "allowed") : (null, null, "not found");
         }
         finally
         {
@@ -754,24 +742,22 @@ public static class IPFilter
     }
 
     /// <summary>
-    /// Gets all networks associated with a user.
+    ///     Gets all networks associated with a user.
     /// </summary>
     /// <param name="username">The user ID. </param>
-    /// <returns>An enumerable of CIDR strings.</returns>
+    /// <returns>Enumerable of CIDR strings.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static IEnumerable<string> GetUserNetworks(string username) =>
-        _userToCidrsIndex.TryGetValue(username, out ConcurrentHashSet<string>? set) ? set.Keys.ToArray() : [];
+    public static IEnumerable<string> GetUserNetworks(string username) => _userToCidrsIndex.TryGetValue(username, out ConcurrentHashSet<string>? set) ? set.Keys.ToArray() : [];
 
     /// <summary>
-    /// Gets the global deny list.
+    ///     Gets the global deny list.
     /// </summary>
     /// <returns>Enumerable of CIDR strings in the deny list.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static IEnumerable<string> GetGlobalDenyList() =>
-        _globalDenyList.Select(entry => ToCidrString(entry.Key.Net, entry.Key.Prefix, entry.Key.IsIPv6)).ToArray();
+    public static IEnumerable<string> GetGlobalDenyList() => _globalDenyList.Select(entry => ToCidrString(entry.Key.Net, entry.Key.Prefix, entry.Key.IsIPv6)).ToArray();
 
     /// <summary>
-    /// Checks if an IP address is in the deny list.
+    ///     Checks if an IP address is in the deny list.
     /// </summary>
     /// <param name="ip">The IP address as a byte span.</param>
     /// <param name="isIPv6">True if the IP is IPv6, false for IPv4.</param>
@@ -811,11 +797,12 @@ public static class IPFilter
                 return true;
             }
         }
+
         return false;
     }
 
     /// <summary>
-    /// Parses a CIDR or IP range into a list of CIDRs.
+    ///     Parses a CIDR or IP range into a list of CIDRs.
     /// </summary>
     private static (string Ip, int Prefix)[] ParseCidrOrRange(ReadOnlySpan<char> input, out bool isIPv6)
     {
@@ -849,7 +836,7 @@ public static class IPFilter
     }
 
     /// <summary>
-    /// Converts an IPv4 range to a list of CIDRs.
+    ///     Converts an IPv4 range to a list of CIDRs.
     /// </summary>
     private static (string Ip, int Prefix)[] RangeToCidrsIPv4(string start, string end)
     {
@@ -861,21 +848,22 @@ public static class IPFilter
         List<(string, int)> res = new();
         while (s <= e)
         {
-            int maxLenByAlign = (s == 0) ? 32 : 32 - BitOperations.TrailingZeroCount(s);
-            int maxLenByRange = 32 - (int)Math.Floor(Math.Log2(e - s + 1));
+            int maxLenByAlign = s == 0 ? 32 : 32 - BitOperations.TrailingZeroCount(s);
+            int maxLenByRange = 32 - (int)Math.Floor(Math.Log2((e - s) + 1));
             int prefix = Math.Min(maxLenByAlign, maxLenByRange);
 
-            string ip = $"{(s>>24)&255}.{(s>>16)&255}.{(s>>8)&255}.{s&255}";
+            string ip = $"{(s >> 24) & 255}.{(s >> 16) & 255}.{(s >> 8) & 255}.{s & 255}";
             res.Add((ip, prefix));
 
-            uint block = prefix == 32 ? 1u : (1u << (32 - prefix));
+            uint block = prefix == 32 ? 1u : 1u << (32 - prefix);
             s += block;
         }
+
         return res.ToArray();
     }
 
     /// <summary>
-    /// Parses an IPv4 address to a uint.
+    ///     Parses an IPv4 address to uint.
     /// </summary>
     private static bool TryParseIpv4ToUint(string s, out uint value)
     {
@@ -883,7 +871,8 @@ public static class IPFilter
         int octet = 0, octetIdx = 0, digits = 0;
         for (int i = 0; i <= s.Length; i++)
         {
-            bool end = i == s.Length; char c = end ? '.' : s[i];
+            bool end = i == s.Length;
+            char c = end ? '.' : s[i];
             if (c == '.')
             {
                 if (digits == 0 || octet > 255 || octetIdx >= 4)
@@ -892,7 +881,9 @@ public static class IPFilter
                 }
 
                 value = (value << 8) | (uint)octet;
-                octet = 0; digits = 0; octetIdx++;
+                octet = 0;
+                digits = 0;
+                octetIdx++;
             }
             else if (c is >= '0' and <= '9')
             {
@@ -901,18 +892,19 @@ public static class IPFilter
                     return false;
                 }
 
-                octet = octet * 10 + (c - '0');
+                octet = (octet * 10) + (c - '0');
             }
             else
             {
                 return false;
             }
         }
+
         return octetIdx == 4;
     }
 
     /// <summary>
-    /// Inserts an IPv4 network into the Trie.
+    ///     Inserts an IPv4 network into the Trie.
     /// </summary>
     private static void InsertIPv4Network(Span<byte> ipBytes, int prefix, string cidr, string username)
     {
@@ -930,13 +922,11 @@ public static class IPFilter
                 current.Cidr = cidr;
                 current.UserId = username;
             }
+
             return;
         }
 
-        if (_roots4[first] == null)
-        {
-            _roots4[first] = new() { BitIndex = 0 };
-        }
+        _roots4[first] ??= new() { BitIndex = 0 };
 
         Node currentNode = _roots4[first]!;
         for (int bit = IPv4Stride; bit < prefix;)
@@ -953,16 +943,18 @@ public static class IPFilter
                 Node newNode = new() { BitIndex = bit, Children = { [bitValue] = currentNode.Children[bitValue] } };
                 currentNode.Children[bitValue] = newNode;
             }
+
             currentNode = currentNode.Children[bitValue]!;
             bit = currentNode.BitIndex + 1;
         }
+
         currentNode.IsAllowed = true;
         currentNode.Cidr = cidr;
         currentNode.UserId = username;
     }
 
     /// <summary>
-    /// Inserts an IPv6 network into the Trie.
+    ///     Inserts an IPv6 network into the Trie.
     /// </summary>
     private static void InsertIPv6Network(Span<byte> ipBytes, int prefix, string cidr, string username)
     {
@@ -979,6 +971,7 @@ public static class IPFilter
                 current.Cidr = cidr;
                 current.UserId = username;
             }
+
             return;
         }
 
@@ -998,16 +991,18 @@ public static class IPFilter
                 Node newNode = new() { BitIndex = bit, Children = { [bitValue] = currentNode.Children[bitValue] } };
                 currentNode.Children[bitValue] = newNode;
             }
+
             currentNode = currentNode.Children[bitValue]!;
             bit = currentNode.BitIndex + 1;
         }
+
         currentNode.IsAllowed = true;
         currentNode.Cidr = cidr;
         currentNode.UserId = username;
     }
 
     /// <summary>
-    /// Converts a byte array and prefix to a CIDR string.
+    ///     Converts a byte array and prefix to a CIDR string.
     /// </summary>
     private static string ToCidrString(ReadOnlySpan<byte> ipBytes, int prefix, bool isIPv6)
     {
@@ -1019,7 +1014,7 @@ public static class IPFilter
         Span<ushort> h = stackalloc ushort[8];
         for (int i = 0; i < 8; i++)
         {
-            h[i] = (ushort)((ipBytes[i * 2] << 8) | ipBytes[i * 2 + 1]);
+            h[i] = (ushort)((ipBytes[i * 2] << 8) | ipBytes[(i * 2) + 1]);
         }
 
         int bestStart = -1, bestLen = 0, curStart = -1, curLen = 0;
@@ -1027,16 +1022,29 @@ public static class IPFilter
         {
             if (h[i] == 0)
             {
-                if (curStart < 0) { curStart = i; curLen = 1; }
+                if (curStart < 0)
+                {
+                    curStart = i;
+                    curLen = 1;
+                }
                 else
                 {
                     curLen++;
                 }
 
-                if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
+                if (curLen > bestLen)
+                {
+                    bestLen = curLen;
+                    bestStart = curStart;
+                }
             }
-            else { curStart = -1; curLen = 0; }
+            else
+            {
+                curStart = -1;
+                curLen = 0;
+            }
         }
+
         if (bestLen < 2)
         {
             bestStart = -1;
@@ -1069,12 +1077,13 @@ public static class IPFilter
                 }
             }
         }
+
         sb.Append('/').Append(prefix);
         return sb.ToString();
     }
 
     /// <summary>
-    /// Applies a netmask to an IP address byte array.
+    ///     Applies a netmask to an IP address byte array.
     /// </summary>
     private static void ApplyNetmask(Span<byte> bytes, int prefix)
     {
@@ -1092,7 +1101,7 @@ public static class IPFilter
     }
 
     /// <summary>
-    /// Parses an IP address string into a byte array.
+    ///     Parses an IP address string into a byte array.
     /// </summary>
     private static bool TryParseIp(ReadOnlySpan<char> ipSpan, Span<byte> ipBytes, bool isIPv6)
     {
@@ -1101,11 +1110,11 @@ public static class IPFilter
             return TryParseIpv4(ipSpan, ipBytes);
         }
 
-        Span<ushort> hextets = stackalloc ushort[8];
-        int hextetIndex = 0, start = 0, doubleColonIndex = -1;
+        Span<ushort> span = stackalloc ushort[8];
+        int index = 0, start = 0, doubleColonIndex = -1;
         for (int i = 0; i <= ipSpan.Length; i++)
         {
-            bool atEnd = (i == ipSpan.Length);
+            bool atEnd = i == ipSpan.Length;
             if (!atEnd && ipSpan[i] != ':')
             {
                 continue;
@@ -1121,66 +1130,69 @@ public static class IPFilter
                         return false;
                     }
 
-                    doubleColonIndex = hextetIndex;
+                    doubleColonIndex = index;
                     i++;
                     start = i + 1;
                     continue;
                 }
-                else
-                {
-                    if (doubleColonIndex < 0)
-                    {
-                        return false;
-                    }
 
-                    start = i + 1;
-                    continue;
+                if (doubleColonIndex < 0)
+                {
+                    return false;
                 }
+
+                start = i + 1;
+                continue;
             }
-            if (hextetIndex >= 8 || !TryParseHex(ipSpan.Slice(start, len), out hextets[hextetIndex++]))
+
+            if (index >= 8 || !TryParseHex(ipSpan.Slice(start, len), out span[index++]))
             {
                 return false;
             }
 
             start = i + 1;
         }
+
         if (doubleColonIndex >= 0)
         {
-            int missing = 8 - hextetIndex;
-            for (int j = hextetIndex - 1; j >= doubleColonIndex; j--)
+            int missing = 8 - index;
+            for (int j = index - 1; j >= doubleColonIndex; j--)
             {
-                hextets[j + missing] = hextets[j];
+                span[j + missing] = span[j];
             }
 
             for (int j = doubleColonIndex; j < doubleColonIndex + missing; j++)
             {
-                hextets[j] = 0;
+                span[j] = 0;
             }
 
-            hextetIndex = 8;
+            index = 8;
         }
-        if (hextetIndex != 8)
+
+        if (index != 8)
         {
             return false;
         }
 
         for (int i = 0; i < 8; i++)
         {
-            ipBytes[i * 2] = (byte)(hextets[i] >> 8);
-            ipBytes[i * 2 + 1] = (byte)hextets[i];
+            ipBytes[i * 2] = (byte)(span[i] >> 8);
+            ipBytes[(i * 2) + 1] = (byte)span[i];
         }
+
         return true;
     }
 
     /// <summary>
-    /// Parses an IPv4 address string into a byte array.
+    ///     Parses an IPv4 address string into a byte array.
     /// </summary>
     private static bool TryParseIpv4(ReadOnlySpan<char> s, Span<byte> ipBytes)
     {
         int octet = 0, octetIdx = 0, digits = 0;
         for (int i = 0; i <= s.Length; i++)
         {
-            bool end = (i == s.Length); char c = end ? '.' : s[i];
+            bool end = i == s.Length;
+            char c = end ? '.' : s[i];
             if (c == '.')
             {
                 if (digits == 0 || octet > 255 || octetIdx >= 4)
@@ -1189,7 +1201,8 @@ public static class IPFilter
                 }
 
                 ipBytes[octetIdx++] = (byte)octet;
-                octet = 0; digits = 0;
+                octet = 0;
+                digits = 0;
             }
             else if (c is >= '0' and <= '9')
             {
@@ -1198,52 +1211,53 @@ public static class IPFilter
                     return false;
                 }
 
-                octet = octet * 10 + (c - '0');
+                octet = (octet * 10) + (c - '0');
             }
             else
             {
                 return false;
             }
         }
+
         return octetIdx == 4;
     }
 
     /// <summary>
-    /// Parses a hexadecimal string into a ushort.
+    ///     Parses a hexadecimal string into ushort.
     /// </summary>
     private static bool TryParseHex(ReadOnlySpan<char> hex, out ushort value)
     {
         value = 0;
-        if (hex.Length == 0 || hex.Length > 4)
+        if (hex.Length is 0 or > 4)
         {
             return false;
         }
 
-        for (int i = 0; i < hex.Length; i++)
+        foreach (char c in hex)
         {
-            char c = hex[i];
             if (c is >= '0' and <= '9')
             {
                 value = (ushort)((value << 4) | (c - '0'));
             }
             else if (c is >= 'a' and <= 'f')
             {
-                value = (ushort)((value << 4) | (c - 'a' + 10));
+                value = (ushort)((value << 4) | ((c - 'a') + 10));
             }
             else if (c is >= 'A' and <= 'F')
             {
-                value = (ushort)((value << 4) | (c - 'A' + 10));
+                value = (ushort)((value << 4) | ((c - 'A') + 10));
             }
             else
             {
                 return false;
             }
         }
+
         return true;
     }
 
     /// <summary>
-    /// Extracts the IP address from an X-Forwarded-For header or raw IP string.
+    ///     Extracts the IP address from an X-Forwarded-For header or raw IP string.
     /// </summary>
     private static ReadOnlySpan<char> ExtractIpSpan(ReadOnlySpan<char> raw)
     {
@@ -1267,6 +1281,7 @@ public static class IPFilter
                 s = s.Slice(1, close - 1);
             }
         }
+
         int pct = s.IndexOf('%');
         if (pct >= 0)
         {
@@ -1279,7 +1294,11 @@ public static class IPFilter
             bool allDigits = true;
             for (int i = lastColon + 1; i < s.Length; i++)
             {
-                if (s[i] < '0' || s[i] > '9') { allDigits = false; break; }
+                if (s[i] < '0' || s[i] > '9')
+                {
+                    allDigits = false;
+                    break;
+                }
             }
 
             if (allDigits)
@@ -1287,7 +1306,28 @@ public static class IPFilter
                 s = s[..lastColon];
             }
         }
+
         return s;
     }
-}
 
+    /// <summary>
+    ///     A thread-safe hash set implementation for storing items.
+    /// </summary>
+    private class ConcurrentHashSet<T> : ConcurrentDictionary<T, byte> where T : notnull
+    {
+        /// <summary>
+        ///     Gets whether the set is empty.
+        /// </summary>
+        public new bool IsEmpty => base.IsEmpty;
+
+        /// <summary>
+        ///     Adds an item to the set.
+        /// </summary>
+        public bool Add(T item) => TryAdd(item, 0);
+
+        /// <summary>
+        ///     Removes an item from the set.
+        /// </summary>
+        public bool TryRemove(T item) => TryRemove(item, out _);
+    }
+}
