@@ -2,6 +2,31 @@
 
 using Arad.TrieNet;
 
+(string cidr, string? username, bool isDeny)[] initial =
+[
+    ("91.199.9.60", "user1", false),
+    ("185.37.54.112/27", "user1", false),
+    ("180.31.2.5/29", "user2", false),
+    ("fe80::/10", "user2", false),
+    ("10.0.0.0/5", "user3", false),
+    ("2001:db8::/32", "user3", false),
+    ("192.168.1.0/24", null, true),
+    ("0.0.0.0/0", "admin", false),
+    ("192.168.1.1-192.168.1.10", "user1", false)
+];
+
+foreach ((string cidrItem, string? username, bool isDeny) in initial)
+{
+    if (isDeny)
+    {
+        IPFilter.AddDeny(cidrItem.AsSpan());
+    }
+    else
+    {
+        IPFilter.AddNetwork(cidrItem.AsSpan(), username!);
+    }
+}
+
 Console.WriteLine("IPFilter tests:");
 Console.WriteLine("IsAllowed:");
 (bool allowed, string reason) = IPFilter.IsAllowed("user1", "185.37.54.116");

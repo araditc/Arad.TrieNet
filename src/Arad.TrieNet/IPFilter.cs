@@ -1,4 +1,5 @@
 ﻿using System.Collections.Concurrent;
+using System.Net;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -29,34 +30,6 @@ public static class IPFilter
     private static readonly ReaderWriterLockSlim _lock = new();
     private static string? _v4AllOwner;
     private static string? _v6AllOwner;
-
-    static IPFilter()
-    {
-        (string cidr, string? username, bool isDeny)[] initial =
-        [
-            ("91.199.9.60", "user1", false),
-            ("185.37.54.112/27", "user1", false),
-            ("180.31.2.5/29", "user2", false),
-            ("fe80::/10", "user2", false),
-            ("10.0.0.0/5", "user3", false),
-            ("2001:db8::/32", "user3", false),
-            ("192.168.1.0/24", null, true),
-            ("0.0.0.0/0", "admin", false),
-            ("192.168.1.1-192.168.1.10", "user1", false)
-        ];
-
-        foreach ((string cidr, string? username, bool isDeny) in initial)
-        {
-            if (isDeny)
-            {
-                AddDeny(cidr.AsSpan());
-            }
-            else
-            {
-                AddNetwork(cidr.AsSpan(), username!);
-            }
-        }
-    }
 
     /// <summary>
     ///     Adds a network or range to a user's allowed list.
@@ -1308,6 +1281,409 @@ public static class IPFilter
         }
 
         return s;
+    }
+
+    /// <summary>
+    /// Checks if a single IP exists in any user-registered subnets.
+    /// Returns whether it exists, matched username, matched CIDR and reason.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static (bool Exists, string? Username, string? Cidr, string Reason) ContainsIp(ReadOnlySpan<char> ip)
+    {
+        if (ip.IsEmpty)
+        {
+            return (false, null, null, "invalid input");
+        }
+
+        ReadOnlySpan<char> ipSpan = ExtractIpSpan(ip);
+        if (ipSpan.IsEmpty)
+        {
+            return (false, null, null, "invalid IP");
+        }
+
+        bool isIPv6 = ipSpan.Contains(':');
+        Span<byte> ipBytes = stackalloc byte[isIPv6 ? 16 : 4];
+
+        if (ip.ContainsAny("/"))
+        {
+            int slash = ip.IndexOf('/');
+            if (slash >= 0)
+            {
+                if (!int.TryParse(ip[(slash + 1)..], out int prefix) || prefix < 0 || prefix > (isIPv6 ? 128 : 32))
+                {
+                    return (false, null, null, "invalid IP");
+                }
+            }
+        }
+        else if (!TryParseIp(ipSpan, ipBytes, isIPv6))
+        {
+            return (false, null, null, "invalid IP");
+        }
+
+        _lock.EnterReadLock();
+        try
+        {
+            if (IsInDenyList(ipBytes, isIPv6))
+            {
+                return (false, null, null, "blacklisted");
+            }
+
+            Node? current;
+            string? matchedUser = null, matchedCidr = null;
+            if (isIPv6)
+            {
+                if (_v6AllOwner is not null)
+                {
+                    return (true, _v6AllOwner, "::/0", "allowed");
+                }
+
+                if (!_roots6.TryGetValue((ipBytes[0] << 8) | ipBytes[1], out current))
+                {
+                    return (false, null, null, "not found");
+                }
+            }
+            else
+            {
+                if (_v4AllOwner is not null)
+                {
+                    return (true, _v4AllOwner, "0.0.0.0/0", "allowed");
+                }
+
+                if (_roots4[ipBytes[0]] == null)
+                {
+                    return (false, null, null, "not found");
+                }
+
+                current = _roots4[ipBytes[0]];
+            }
+
+            if (current == null)
+            {
+                return (false, null, null, "not found");
+            }
+
+            int startBit = isIPv6 ? IPv6Stride : IPv4Stride;
+
+            int bit = startBit;
+            while (bit < ipBytes.Length * 8)
+            {
+                if (current is { IsAllowed: true, UserId: not null })
+                {
+                    matchedUser = current.UserId;
+                    matchedCidr = current.Cidr;
+                }
+                int byteIndex = bit / 8;
+                int bitIndex = 7 - (bit % 8);
+                int bitValue = (ipBytes[byteIndex] >> bitIndex) & 1;
+                current = current.Children[bitValue];
+
+                if (current == null)
+                {
+                    break;
+                }
+
+                bit = current.BitIndex + 1;
+            }
+
+            if (current is { IsAllowed: true, UserId: not null })
+            {
+                matchedUser = current.UserId;
+                matchedCidr = current.Cidr;
+            }
+
+            if (matchedUser != null)
+            {
+                return (true, matchedUser, matchedCidr, "found in user subnet");
+            }
+
+            return (false, null, null, "not found");
+        }
+        finally
+        {
+            _lock.ExitReadLock();
+        }
+    }
+
+    /// <summary>
+    /// Checks whether a CIDR overlaps with any user-registered subnet.
+    /// If plain IP given, redirects to <see cref="ContainsIp"/>.
+    /// </summary>
+    public static (bool Exists, string? Username, string? Cidr, string Reason) ContainsCidr(string cidr)
+    {
+        if (!cidr.Contains('/'))
+        {
+            // Input was a plain IP → pass it to the previous method
+            return ContainsIp(cidr);
+        }
+
+        string[] parts = cidr.Split('/');
+        if (parts.Length != 2 || !IPAddress.TryParse(parts[0], out IPAddress? baseIp) || !int.TryParse(parts[1], out int prefix))
+        {
+            return (false, null, null, "invalid CIDR");
+        }
+
+        bool isIPv6 = baseIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6;
+        Span<byte> ipBytes = stackalloc byte[isIPv6 ? 16 : 4];
+        baseIp.GetAddressBytes().CopyTo(ipBytes);
+
+        _lock.EnterReadLock();
+        try
+        {
+            Node? current;
+            if (isIPv6)
+            {
+                if (_v6AllOwner is not null)
+                {
+                    return (true, _v6AllOwner, "::/0", "allowed");
+                }
+
+                if (!_roots6.TryGetValue((ipBytes[0] << 8) | ipBytes[1], out current))
+                {
+                    return (false, null, null, "not found");
+                }
+            }
+            else
+            {
+                if (_v4AllOwner is not null)
+                {
+                    return (true, _v4AllOwner, "0.0.0.0/0", "allowed");
+                }
+
+                current = _roots4[ipBytes[0]];
+                if (current == null)
+                {
+                    return (false, null, null, "not found");
+                }
+            }
+
+            // Traverse the prefix path
+            int bit = isIPv6 ? IPv6Stride : IPv4Stride;
+            int maxBits = ipBytes.Length * 8;
+
+            while (bit < prefix && bit < maxBits && current != null)
+            {
+                if (current.IsAllowed && current.UserId is not null)
+                {
+                    return (true, current.UserId, current.Cidr, "found in subnet");
+                }
+
+                int byteIndex = bit / 8;
+                int bitIndex = 7 - (bit % 8);
+                int bitValue = (ipBytes[byteIndex] >> bitIndex) & 1;
+                current = current.Children[bitValue];
+                bit = current?.BitIndex + 1 ?? maxBits;
+            }
+
+            // Input was a plain IP → pass it to the previous method
+            if (current != null)
+            {
+                Node? found = FindAnyAllowedInSubtree(current);
+                if (found != null)
+                {
+                    return (true, found.UserId, found.Cidr, $"found in CIDR {cidr}");
+                }
+            }
+
+            return (false, null, cidr, "no IP found in CIDR");
+        }
+        finally
+        {
+            _lock.ExitReadLock();
+        }
+    }
+
+    private static Node? FindAnyAllowedInSubtree(Node node)
+    {
+        if (node is { IsAllowed: true, UserId: not null })
+        {
+            return node;
+        }
+
+        if (node.Children[0] != null)
+        {
+            Node? f = FindAnyAllowedInSubtree(node.Children[0]!);
+            if (f != null)
+            {
+                return f;
+            }
+        }
+        if (node.Children[1] != null)
+        {
+            Node? f = FindAnyAllowedInSubtree(node.Children[1]!);
+            if (f != null)
+            {
+                return f;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Normalizes a CIDR by adjusting the IP address to the network address.
+    /// </summary>
+    /// <param name="cidr">The CIDR to normalize (e.g., "91.199.9.90/28").
+    /// <returns>The normalized CIDR string (e.g., "91.199.9.80/28") or an empty string if invalid.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string NormalizeCidr(ReadOnlySpan<char> cidr)
+    {
+        (string Ip, int Prefix)[] cidrs = ParseCidrOrRange(cidr, out bool isIPv6);
+        if (cidrs.Length != 1)
+        {
+            return string.Empty; // Only single CIDR is supported, not ranges
+        }
+
+        (string ip, int prefix) = cidrs[0];
+        Span<byte> ipBytes = stackalloc byte[isIPv6 ? 16 : 4];
+        if (!TryParseIp(ip.AsSpan(), ipBytes, isIPv6))
+        {
+            return string.Empty;
+        }
+
+        ApplyNetmask(ipBytes, prefix);
+        return ToCidrString(ipBytes, prefix, isIPv6);
+    }
+
+    /// <summary>
+    /// Finds all overlaps between a given IP/CIDR and user-registered CIDRs.
+    /// Returns a list of (UserId, Cidr).
+    /// </summary>
+    public static List<(string UserId, string Cidr)> FindOverlaps(string ipOrCidr)
+    {
+        List<(string UserId, string Cidr)> results = [];
+
+        // Single IP mode
+        if (!ipOrCidr.Contains('/'))
+        {
+            if (!IPAddress.TryParse(ipOrCidr, out IPAddress? ip))
+            {
+                return results;
+            }
+
+            CollectAllOverlaps(ip, results);
+            return results;
+        }
+
+        // CIDR mode
+        string[] parts = ipOrCidr.Split('/');
+        if (parts.Length != 2 ||
+            !IPAddress.TryParse(parts[0], out IPAddress? baseIp) ||
+            !int.TryParse(parts[1], out int prefix))
+        {
+            return results;
+        }
+
+        CollectAllCidrOverlaps(baseIp, prefix, results);
+
+        return results;
+    }
+
+    private static void CollectAllOverlaps(IPAddress ip, List<(string UserId, string Cidr)> results)
+    {
+        byte[] ipBytes = ip.GetAddressBytes();
+        bool isIPv6 = ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6;
+
+        Node? root;
+        if (!isIPv6)
+        {
+            root = _roots4[ipBytes[0]];
+            if (root == null)
+            {
+                return;
+            }
+        }
+        else
+        {
+            int rootKey = (ipBytes[0] << 8) | ipBytes[1];
+            if (rootKey >= _roots6.Count || (root = _roots6[rootKey]) == null)
+            {
+                return;
+            }
+        }
+
+        TraverseAllOverlaps(root, ipBytes, 0, ipBytes.Length * 8, results);
+    }
+
+    private static void CollectAllCidrOverlaps(IPAddress baseIp, int prefix, List<(string UserId, string Cidr)> results)
+    {
+        byte[] ipBytes = baseIp.GetAddressBytes();
+        bool isIPv6 = baseIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6;
+
+        Node? root;
+        if (!isIPv6)
+        {
+            root = _roots4[ipBytes[0]];
+            if (root == null)
+            {
+                return;
+            }
+        }
+        else
+        {
+            int rootKey = (ipBytes[0] << 8) | ipBytes[1];
+            if (rootKey >= _roots6.Count || (root = _roots6[rootKey]) == null)
+            {
+                return;
+            }
+        }
+
+        TraverseAllCidrOverlaps(root, ipBytes, prefix, 0, results);
+    }
+
+    private static void TraverseAllOverlaps(Node? node, byte[] ipBytes, int depth, int maxDepth, List<(string UserId, string Cidr)> results)
+    {
+        if (node == null)
+        {
+            return;
+        }
+
+        if (node is { IsAllowed: true, UserId: not null, Cidr: not null })
+        {
+            results.Add((node.UserId, node.Cidr));
+        }
+
+        if (depth >= maxDepth)
+        {
+            return;
+        }
+
+        int byteIndex = depth / 8;
+        int bitIndex = 7 - (depth % 8);
+        int bitValue = (ipBytes[byteIndex] >> bitIndex) & 1;
+
+        // Main bit path
+        TraverseAllOverlaps(node.Children[bitValue], ipBytes, depth + 1, maxDepth, results);
+
+        // Opposite path → to find all overlapping nodes (/32, etc.)
+        TraverseAllOverlaps(node.Children[1 - bitValue], ipBytes, depth + 1, maxDepth, results);
+    }
+
+    private static void TraverseAllCidrOverlaps(Node? node, byte[] ipBytes, int prefix, int depth, List<(string UserId, string Cidr)> results)
+    {
+        if (node == null)
+        {
+            return;
+        }
+
+        if (node is { IsAllowed: true, UserId: not null, Cidr: not null })
+        {
+            results.Add((node.UserId, node.Cidr));
+        }
+
+        if (depth >= prefix)
+        {
+            return;
+        }
+
+        int byteIndex = depth / 8;
+        int bitIndex = 7 - (depth % 8);
+        int bitValue = (ipBytes[byteIndex] >> bitIndex) & 1;
+
+        // Main bit path
+        TraverseAllCidrOverlaps(node.Children[bitValue], ipBytes, prefix, depth + 1, results);
+
+        // Opposite path → for all overlapping nodes
+        TraverseAllCidrOverlaps(node.Children[1 - bitValue], ipBytes, prefix, depth + 1, results);
     }
 
     /// <summary>
